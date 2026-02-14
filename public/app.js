@@ -293,108 +293,130 @@ $('closeReceiptBtn').addEventListener('click', () => $('receiptModal').classList
 $('printReceipt').addEventListener('click', () => window.print());
 
 // ===== Dashboard =====
+// Safe element setter — won't crash if element doesn't exist
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+function setHTML(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+function safeNum(val) {
+  const n = parseFloat(val);
+  return isNaN(n) ? 0 : n;
+}
+
 async function loadDashboard() {
-  $('dashDate').textContent = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-  const data = await api('/dashboard');
+  try {
+    setText('dashDate', new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }));
 
-  // Today stats
-  $('statRevenue').textContent = `SAR ${data.today.revenue.toFixed(2)}`;
-  $('statProfit').textContent = `SAR ${data.today.profit.toFixed(2)}`;
-  $('statTxCount').textContent = data.today.transactions;
-  $('statTax').textContent = `SAR ${data.today.tax.toFixed(2)}`;
+    const data = await api('/dashboard');
+    console.log('Dashboard data:', JSON.stringify(data).slice(0, 200));
 
-  // All-time stats
-  $('statAllTimeTx').textContent = data.allTime.transactions;
-  $('statAllTimeRev').textContent = `SAR ${data.allTime.revenue.toFixed(2)}`;
+    if (data.error) {
+      console.error('Dashboard API error:', data.error);
+      return;
+    }
 
-  // Recent transactions from DB
-  const tbody = $('dashRecentTx');
-  if (data.recentTransactions.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-row">No transactions yet - make a sale!</td></tr>';
-  } else {
-    tbody.innerHTML = data.recentTransactions.map(tx => {
-      const date = new Date(tx.date);
-      return `
-        <tr>
-          <td><strong>${tx.invoiceNo}</strong></td>
-          <td>${date.toLocaleDateString()} ${date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</td>
-          <td>${tx.customer.name}</td>
-          <td style="text-transform:uppercase;font-size:0.78rem;font-weight:600">${tx.paymentMethod}</td>
-          <td><strong>SAR ${tx.grandTotal.toFixed(2)}</strong></td>
-          <td><span class="status-badge completed">${tx.status}</span></td>
-        </tr>`;
-    }).join('');
-  }
+    // Today stats
+    setText('statRevenue', `SAR ${safeNum(data.today.revenue).toFixed(2)}`);
+    setText('statProfit', `SAR ${safeNum(data.today.profit).toFixed(2)}`);
+    setText('statTxCount', data.today.transactions || 0);
+    setText('statTax', `SAR ${safeNum(data.today.tax).toFixed(2)}`);
 
-  // Top selling products
-  const topSelling = $('dashTopSelling');
-  if (!data.topSelling || data.topSelling.length === 0) {
-    topSelling.innerHTML = '<p class="empty-text">No sales yet today</p>';
-  } else {
-    const maxQty = Math.max(...data.topSelling.map(p => p.qty));
-    topSelling.innerHTML = data.topSelling.map((p, i) => `
-      <div style="margin-bottom:12px">
-        <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:4px">
-          <span>${i + 1}. ${p.name}</span>
-          <strong>${p.qty} sold</strong>
+    // All-time stats
+    setText('statAllTimeTx', data.allTime.transactions || 0);
+    setText('statAllTimeRev', `SAR ${safeNum(data.allTime.revenue).toFixed(2)}`);
+
+    // Recent transactions from DB
+    if (!data.recentTransactions || data.recentTransactions.length === 0) {
+      setHTML('dashRecentTx', '<tr><td colspan="6" class="empty-row">No transactions yet - make a sale!</td></tr>');
+    } else {
+      setHTML('dashRecentTx', data.recentTransactions.map(tx => {
+        const d = new Date(tx.date);
+        return `
+          <tr>
+            <td><strong>${tx.invoiceNo}</strong></td>
+            <td>${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</td>
+            <td>${tx.customer.name}</td>
+            <td style="text-transform:uppercase;font-size:0.78rem;font-weight:600">${tx.paymentMethod}</td>
+            <td><strong>SAR ${safeNum(tx.grandTotal).toFixed(2)}</strong></td>
+            <td><span class="status-badge completed">${tx.status}</span></td>
+          </tr>`;
+      }).join(''));
+    }
+
+    // Top selling products
+    if (!data.topSelling || data.topSelling.length === 0) {
+      setHTML('dashTopSelling', '<p class="empty-text">No sales yet today</p>');
+    } else {
+      const maxQty = Math.max(...data.topSelling.map(p => p.qty));
+      setHTML('dashTopSelling', data.topSelling.map((p, i) => `
+        <div style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:4px">
+            <span>${i + 1}. ${p.name}</span>
+            <strong>${p.qty} sold</strong>
+          </div>
+          <div style="height:6px;background:var(--border-light);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${(p.qty / maxQty * 100)}%;background:linear-gradient(90deg,var(--primary),var(--purple));border-radius:3px"></div>
+          </div>
         </div>
-        <div style="height:6px;background:var(--border-light);border-radius:3px;overflow:hidden">
-          <div style="height:100%;width:${(p.qty / maxQty * 100)}%;background:linear-gradient(90deg,var(--primary),var(--purple));border-radius:3px"></div>
-        </div>
-      </div>
-    `).join('');
-  }
+      `).join(''));
+    }
 
-  // Payment breakdown
-  const payBreak = $('dashPaymentBreakdown');
-  if (!data.paymentBreakdown || data.paymentBreakdown.length === 0) {
-    payBreak.innerHTML = '<p class="empty-text">No payments yet today</p>';
-  } else {
-    const colors = { cash: 'var(--success)', card: 'var(--blue)', bank_transfer: 'var(--purple)' };
-    payBreak.innerHTML = data.paymentBreakdown.map(p => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border-light)">
-        <div style="display:flex;align-items:center;gap:8px">
-          <div style="width:10px;height:10px;border-radius:50%;background:${colors[p.method] || 'var(--text-muted)'}"></div>
-          <span style="font-size:0.85rem;text-transform:capitalize;font-weight:500">${p.method.replace('_', ' ')}</span>
+    // Payment breakdown
+    if (!data.paymentBreakdown || data.paymentBreakdown.length === 0) {
+      setHTML('dashPaymentBreakdown', '<p class="empty-text">No payments yet today</p>');
+    } else {
+      const colors = { cash: 'var(--success)', card: 'var(--blue)', bank_transfer: 'var(--purple)' };
+      setHTML('dashPaymentBreakdown', data.paymentBreakdown.map(p => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border-light)">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:10px;height:10px;border-radius:50%;background:${colors[p.method] || 'var(--text-muted)'}"></div>
+            <span style="font-size:0.85rem;text-transform:capitalize;font-weight:500">${p.method.replace('_', ' ')}</span>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:0.85rem;font-weight:700">SAR ${safeNum(p.total).toFixed(2)}</div>
+            <div style="font-size:0.72rem;color:var(--text-muted)">${p.count} transaction${p.count > 1 ? 's' : ''}</div>
+          </div>
         </div>
-        <div style="text-align:right">
-          <div style="font-size:0.85rem;font-weight:700">SAR ${p.total.toFixed(2)}</div>
-          <div style="font-size:0.72rem;color:var(--text-muted)">${p.count} transaction${p.count > 1 ? 's' : ''}</div>
+      `).join(''));
+    }
+
+    // Low stock
+    if (!data.lowStock || data.lowStock.length === 0) {
+      setHTML('dashLowStock', '<p class="empty-text">All stock levels OK</p>');
+    } else {
+      setHTML('dashLowStock', data.lowStock.map(p => `
+        <div class="low-stock-item">
+          <span>${p.name} <small style="color:var(--text-muted)">(${p.sku})</small></span>
+          <span class="stock-qty">${p.stock} left</span>
         </div>
-      </div>
-    `).join('');
-  }
+      `).join(''));
+    }
 
-  // Low stock
-  const lowStock = $('dashLowStock');
-  if (data.lowStock.length === 0) {
-    lowStock.innerHTML = '<p class="empty-text">All stock levels OK</p>';
-  } else {
-    lowStock.innerHTML = data.lowStock.map(p => `
-      <div class="low-stock-item">
-        <span>${p.name} <small style="color:var(--text-muted)">(${p.sku})</small></span>
-        <span class="stock-qty">${p.stock} left</span>
-      </div>
-    `).join('');
-  }
+    // Sales by day (last 7 days)
+    if (!data.salesByDay || data.salesByDay.length === 0) {
+      setHTML('dashSalesByDay', '<tr><td colspan="4" class="empty-row">No sales data yet</td></tr>');
+    } else {
+      const maxRev = Math.max(...data.salesByDay.map(d => d.revenue));
+      setHTML('dashSalesByDay', data.salesByDay.map(d => {
+        const dt = new Date(d.day);
+        const barWidth = maxRev > 0 ? (d.revenue / maxRev * 100) : 0;
+        return `
+          <tr>
+            <td>${dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</td>
+            <td><strong>${d.transactions}</strong></td>
+            <td>SAR ${safeNum(d.revenue).toFixed(2)}</td>
+            <td><div style="height:8px;background:var(--border-light);border-radius:4px;min-width:100px"><div style="height:100%;width:${barWidth}%;background:linear-gradient(90deg,var(--success),var(--blue));border-radius:4px"></div></div></td>
+          </tr>`;
+      }).join(''));
+    }
 
-  // Sales by day (last 7 days)
-  const salesBody = $('dashSalesByDay');
-  if (!data.salesByDay || data.salesByDay.length === 0) {
-    salesBody.innerHTML = '<tr><td colspan="4" class="empty-row">No sales data yet</td></tr>';
-  } else {
-    const maxRev = Math.max(...data.salesByDay.map(d => d.revenue));
-    salesBody.innerHTML = data.salesByDay.map(d => {
-      const date = new Date(d.day);
-      const barWidth = maxRev > 0 ? (d.revenue / maxRev * 100) : 0;
-      return `
-        <tr>
-          <td>${date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</td>
-          <td><strong>${d.transactions}</strong></td>
-          <td>SAR ${d.revenue.toFixed(2)}</td>
-          <td><div style="height:8px;background:var(--border-light);border-radius:4px;min-width:100px"><div style="height:100%;width:${barWidth}%;background:linear-gradient(90deg,var(--success),var(--blue));border-radius:4px"></div></div></td>
-        </tr>`;
-    }).join('');
+    console.log('Dashboard rendered OK');
+  } catch (err) {
+    console.error('Dashboard render error:', err);
   }
 }
 // expose globally for refresh button
