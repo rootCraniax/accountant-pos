@@ -116,7 +116,10 @@
       <div class="view" id="view-dashboard">
         <div class="view-header">
           <h2>Dashboard</h2>
-          <span class="view-date" id="dashDate"></span>
+          <div style="display:flex;align-items:center;gap:12px">
+            <span class="view-date" id="dashDate"></span>
+            <button class="btn btn-sm btn-secondary" onclick="loadDashboard()">Refresh</button>
+          </div>
         </div>
         <div class="stats-grid" id="statsGrid">
           <div class="stat-card">
@@ -156,24 +159,66 @@
             </div>
           </div>
         </div>
+
+        <!-- All-time banner -->
+        <div style="padding:0 32px">
+          <div class="dash-card" style="background:linear-gradient(135deg,#4f46e5,#7c3aed);color:white;margin-top:0">
+            <div style="display:flex;justify-content:space-around;text-align:center">
+              <div><span style="font-size:0.8rem;opacity:0.8;display:block">All-Time Transactions</span><span style="font-size:1.6rem;font-weight:800" id="statAllTimeTx">0</span></div>
+              <div><span style="font-size:0.8rem;opacity:0.8;display:block">All-Time Revenue</span><span style="font-size:1.6rem;font-weight:800" id="statAllTimeRev">SAR 0.00</span></div>
+            </div>
+          </div>
+        </div>
+
         <div class="dash-grid">
           <div class="dash-card">
-            <h3>Recent Transactions</h3>
+            <h3>Recent Transactions (from DB)</h3>
             <div class="dash-table-wrap">
               <table class="dash-table">
                 <thead>
-                  <tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Status</th></tr>
+                  <tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Payment</th><th>Amount</th><th>Status</th></tr>
                 </thead>
                 <tbody id="dashRecentTx">
-                  <tr><td colspan="4" class="empty-row">No transactions yet</td></tr>
+                  <tr><td colspan="6" class="empty-row">No transactions yet</td></tr>
                 </tbody>
               </table>
             </div>
           </div>
+          <div style="display:flex;flex-direction:column;gap:20px">
+            <div class="dash-card">
+              <h3>Top Selling Products (Today)</h3>
+              <div id="dashTopSelling">
+                <p class="empty-text">No sales yet today</p>
+              </div>
+            </div>
+            <div class="dash-card">
+              <h3>Payment Breakdown (Today)</h3>
+              <div id="dashPaymentBreakdown">
+                <p class="empty-text">No payments yet today</p>
+              </div>
+            </div>
+            <div class="dash-card">
+              <h3>Low Stock Alerts</h3>
+              <div class="low-stock-list" id="dashLowStock">
+                <p class="empty-text">All stock levels OK</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sales last 7 days -->
+        <div style="padding:0 32px 32px">
           <div class="dash-card">
-            <h3>Low Stock Alerts</h3>
-            <div class="low-stock-list" id="dashLowStock">
-              <p class="empty-text">All stock levels OK</p>
+            <h3>Sales History (Last 7 Days)</h3>
+            <div class="dash-table-wrap">
+              <table class="dash-table">
+                <thead>
+                  <tr><th>Date</th><th>Transactions</th><th>Revenue (SAR)</th><th>Trend</th></tr>
+                </thead>
+                <tbody id="dashSalesByDay">
+                  <tr><td colspan="4" class="empty-row">No sales data yet</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

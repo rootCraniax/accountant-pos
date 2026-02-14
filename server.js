@@ -276,43 +276,88 @@ app.get('/api/dashboard', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
 
-    const todayTx = await pool.query(
-      "SELECT * FROM transactions WHERE date::date = $1",
-      [today]
-    );
+    // Today's aggregated stats (single query)
+    const todayStats = await pool.query(`
+      SELECT
+        COUNT(*)::int AS tx_count,
+        COALESCE(SUM(grand_total), 0) AS revenue,
+        COALESCE(SUM(tax), 0) AS tax_total,
+        COALESCE(SUM(subtotal), 0) AS subtotal_total
+      FROM transactions WHERE date::date = $1
+    `, [today]);
+    const ts = todayStats.rows[0];
 
-    const txList = todayTx.rows;
-    const totalRevenue = txList.reduce((sum, t) => sum + parseFloat(t.grand_total), 0);
-    const totalTax = txList.reduce((sum, t) => sum + parseFloat(t.tax), 0);
+    // All-time stats
+    const allTimeStats = await pool.query(`
+      SELECT COUNT(*)::int AS tx_count, COALESCE(SUM(grand_total), 0) AS revenue
+      FROM transactions
+    `);
+    const at = allTimeStats.rows[0];
 
-    // Calculate profit
+    // Today's profit from line items vs product cost
+    const todayTx = await pool.query('SELECT items FROM transactions WHERE date::date = $1', [today]);
     let totalProfit = 0;
-    for (const t of txList) {
+    const productSales = {};
+    for (const t of todayTx.rows) {
       for (const item of t.items) {
         const prod = await pool.query('SELECT cost FROM products WHERE id = $1', [item.productId]);
         const cost = prod.rows.length > 0 ? parseFloat(prod.rows[0].cost) : 0;
         totalProfit += (item.price - cost) * item.qty;
+        productSales[item.name] = (productSales[item.name] || 0) + item.qty;
       }
     }
 
+    // Top selling products today
+    const topSelling = Object.entries(productSales)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, qty]) => ({ name, qty }));
+
+    // Payment method breakdown today
+    const paymentBreakdown = await pool.query(`
+      SELECT payment_method, COUNT(*)::int AS count, COALESCE(SUM(grand_total), 0) AS total
+      FROM transactions WHERE date::date = $1
+      GROUP BY payment_method ORDER BY total DESC
+    `, [today]);
+
+    // Low stock products
     const lowStock = await pool.query('SELECT * FROM products WHERE stock < 20 ORDER BY stock ASC');
-    const allTx = await pool.query('SELECT * FROM transactions ORDER BY id DESC');
-    const recentTx = allTx.rows.slice(0, 5);
+
+    // Recent 10 transactions
+    const recentTx = await pool.query('SELECT * FROM transactions ORDER BY id DESC LIMIT 10');
+
+    // Sales last 7 days
+    const salesByDay = await pool.query(`
+      SELECT date::date AS day, COUNT(*)::int AS tx_count, COALESCE(SUM(grand_total), 0) AS revenue
+      FROM transactions
+      WHERE date >= NOW() - INTERVAL '7 days'
+      GROUP BY date::date ORDER BY day DESC
+    `);
 
     res.json({
       today: {
-        transactions: txList.length,
-        revenue: Math.round(totalRevenue * 100) / 100,
-        tax: Math.round(totalTax * 100) / 100,
-        profit: Math.round(totalProfit * 100) / 100,
+        transactions: ts.tx_count,
+        revenue: parseFloat(parseFloat(ts.revenue).toFixed(2)),
+        tax: parseFloat(parseFloat(ts.tax_total).toFixed(2)),
+        profit: parseFloat(totalProfit.toFixed(2)),
       },
       allTime: {
-        transactions: allTx.rows.length,
-        revenue: Math.round(allTx.rows.reduce((s, t) => s + parseFloat(t.grand_total), 0) * 100) / 100,
+        transactions: at.tx_count,
+        revenue: parseFloat(parseFloat(at.revenue).toFixed(2)),
       },
+      topSelling,
+      paymentBreakdown: paymentBreakdown.rows.map(r => ({
+        method: r.payment_method,
+        count: r.count,
+        total: parseFloat(parseFloat(r.total).toFixed(2)),
+      })),
       lowStock: lowStock.rows.map(r => ({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) })),
-      topSelling: [],
-      recentTransactions: recentTx.map(formatTx),
+      recentTransactions: recentTx.rows.map(formatTx),
+      salesByDay: salesByDay.rows.map(r => ({
+        day: r.day,
+        transactions: r.tx_count,
+        revenue: parseFloat(parseFloat(r.revenue).toFixed(2)),
+      })),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
