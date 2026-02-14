@@ -1,165 +1,322 @@
 const express = require('express');
 const path = require('path');
+const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ===== In-Memory Data Store =====
-let nextProductId = 9;
-let nextTxId = 1001;
+// ===== PostgreSQL Connection =====
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+});
 
-const products = [
-  { id: 1, name: 'Ballpoint Pen (Box)', sku: 'OFF-001', price: 12.99, cost: 7.50, stock: 150, category: 'Office Supplies', tax: 15 },
-  { id: 2, name: 'A4 Paper Ream', sku: 'OFF-002', price: 24.99, cost: 14.00, stock: 80, category: 'Office Supplies', tax: 15 },
-  { id: 3, name: 'Desk Calculator', sku: 'ELC-001', price: 45.00, cost: 22.00, stock: 35, category: 'Electronics', tax: 15 },
-  { id: 4, name: 'USB Flash Drive 64GB', sku: 'ELC-002', price: 29.99, cost: 12.00, stock: 60, category: 'Electronics', tax: 15 },
-  { id: 5, name: 'Receipt Printer Roll', sku: 'OFF-003', price: 8.50, cost: 3.50, stock: 200, category: 'Office Supplies', tax: 15 },
-  { id: 6, name: 'Accounting Ledger Book', sku: 'OFF-004', price: 35.00, cost: 18.00, stock: 45, category: 'Office Supplies', tax: 15 },
-  { id: 7, name: 'Wireless Mouse', sku: 'ELC-003', price: 55.00, cost: 28.00, stock: 40, category: 'Electronics', tax: 15 },
-  { id: 8, name: 'Folder Organizer Set', sku: 'OFF-005', price: 18.75, cost: 9.00, stock: 90, category: 'Office Supplies', tax: 15 },
-];
+// ===== Database Init & Seed =====
+async function initDB() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        sku VARCHAR(50) UNIQUE NOT NULL,
+        price NUMERIC(10,2) NOT NULL,
+        cost NUMERIC(10,2) NOT NULL,
+        stock INTEGER NOT NULL DEFAULT 0,
+        category VARCHAR(100) NOT NULL,
+        tax NUMERIC(5,2) NOT NULL DEFAULT 15
+      );
 
-const transactions = [];
-const customers = [
-  { id: 1, name: 'Walk-in Customer', phone: '', email: '' },
-  { id: 2, name: 'Ahmed Al-Rashid', phone: '+966-50-1234567', email: 'ahmed@company.sa' },
-  { id: 3, name: 'Fatima Holdings LLC', phone: '+966-55-9876543', email: 'accounts@fatima.sa' },
-  { id: 4, name: 'Gulf Trading Co.', phone: '+966-54-1112233', email: 'procurement@gulftrade.sa' },
-];
+      CREATE TABLE IF NOT EXISTS customers (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        phone VARCHAR(50) DEFAULT '',
+        email VARCHAR(255) DEFAULT ''
+      );
+
+      CREATE TABLE IF NOT EXISTS transactions (
+        id SERIAL PRIMARY KEY,
+        invoice_no VARCHAR(20) UNIQUE NOT NULL,
+        date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        customer_id INTEGER REFERENCES customers(id),
+        customer_name VARCHAR(255),
+        items JSONB NOT NULL,
+        subtotal NUMERIC(10,2) NOT NULL,
+        tax NUMERIC(10,2) NOT NULL,
+        grand_total NUMERIC(10,2) NOT NULL,
+        payment_method VARCHAR(50) NOT NULL DEFAULT 'cash',
+        amount_paid NUMERIC(10,2) NOT NULL,
+        change NUMERIC(10,2) NOT NULL DEFAULT 0,
+        status VARCHAR(20) NOT NULL DEFAULT 'completed'
+      );
+    `);
+
+    // Seed products if table is empty
+    const { rows } = await client.query('SELECT COUNT(*) FROM products');
+    if (parseInt(rows[0].count) === 0) {
+      await client.query(`
+        INSERT INTO products (name, sku, price, cost, stock, category, tax) VALUES
+          ('Ballpoint Pen (Box)', 'OFF-001', 12.99, 7.50, 150, 'Office Supplies', 15),
+          ('A4 Paper Ream', 'OFF-002', 24.99, 14.00, 80, 'Office Supplies', 15),
+          ('Desk Calculator', 'ELC-001', 45.00, 22.00, 35, 'Electronics', 15),
+          ('USB Flash Drive 64GB', 'ELC-002', 29.99, 12.00, 60, 'Electronics', 15),
+          ('Receipt Printer Roll', 'OFF-003', 8.50, 3.50, 200, 'Office Supplies', 15),
+          ('Accounting Ledger Book', 'OFF-004', 35.00, 18.00, 45, 'Office Supplies', 15),
+          ('Wireless Mouse', 'ELC-003', 55.00, 28.00, 40, 'Electronics', 15),
+          ('Folder Organizer Set', 'OFF-005', 18.75, 9.00, 90, 'Office Supplies', 15)
+      `);
+    }
+
+    // Seed customers if table is empty
+    const custCount = await client.query('SELECT COUNT(*) FROM customers');
+    if (parseInt(custCount.rows[0].count) === 0) {
+      await client.query(`
+        INSERT INTO customers (name, phone, email) VALUES
+          ('Walk-in Customer', '', ''),
+          ('Ahmed Al-Rashid', '+966-50-1234567', 'ahmed@company.sa'),
+          ('Fatima Holdings LLC', '+966-55-9876543', 'accounts@fatima.sa'),
+          ('Gulf Trading Co.', '+966-54-1112233', 'procurement@gulftrade.sa')
+      `);
+    }
+
+    console.log('Database initialized successfully');
+  } finally {
+    client.release();
+  }
+}
 
 // ===== API Routes =====
 
 // Products
-app.get('/api/products', (req, res) => {
-  const { search, category } = req.query;
-  let result = [...products];
-  if (search) {
-    const q = search.toLowerCase();
-    result = result.filter(p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
+app.get('/api/products', async (req, res) => {
+  try {
+    const { search, category } = req.query;
+    let query = 'SELECT * FROM products WHERE 1=1';
+    const params = [];
+
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      query += ` AND (LOWER(name) LIKE $${params.length} OR LOWER(sku) LIKE $${params.length})`;
+    }
+    if (category && category !== 'All') {
+      params.push(category);
+      query += ` AND category = $${params.length}`;
+    }
+
+    query += ' ORDER BY id';
+    const { rows } = await pool.query(query, params);
+    res.json(rows.map(r => ({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  if (category && category !== 'All') {
-    result = result.filter(p => p.category === category);
-  }
-  res.json(result);
 });
 
-app.post('/api/products', (req, res) => {
-  const product = { id: nextProductId++, ...req.body };
-  products.push(product);
-  res.json(product);
+app.post('/api/products', async (req, res) => {
+  try {
+    const { name, sku, price, cost, stock, category, tax } = req.body;
+    const { rows } = await pool.query(
+      'INSERT INTO products (name, sku, price, cost, stock, category, tax) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
+      [name, sku, price, cost, stock, category, tax || 15]
+    );
+    const r = rows[0];
+    res.json({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.put('/api/products/:id', (req, res) => {
-  const idx = products.findIndex(p => p.id === parseInt(req.params.id));
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  products[idx] = { ...products[idx], ...req.body };
-  res.json(products[idx]);
+app.put('/api/products/:id', async (req, res) => {
+  try {
+    const { name, sku, price, cost, stock, category, tax } = req.body;
+    const { rows } = await pool.query(
+      'UPDATE products SET name=$1, sku=$2, price=$3, cost=$4, stock=$5, category=$6, tax=$7 WHERE id=$8 RETURNING *',
+      [name, sku, price, cost, stock, category, tax, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const r = rows[0];
+    res.json({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Customers
-app.get('/api/customers', (req, res) => res.json(customers));
+app.get('/api/customers', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM customers ORDER BY id');
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Transactions (Checkout)
-app.post('/api/transactions', (req, res) => {
-  const { items, customerId, paymentMethod, amountPaid } = req.body;
-  let subtotal = 0;
-  let totalTax = 0;
-  const lineItems = [];
+app.post('/api/transactions', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  for (const item of items) {
-    const product = products.find(p => p.id === item.productId);
-    if (!product) return res.status(400).json({ error: `Product ${item.productId} not found` });
-    if (product.stock < item.qty) return res.status(400).json({ error: `Insufficient stock for ${product.name}` });
+    const { items, customerId, paymentMethod, amountPaid } = req.body;
+    let subtotal = 0;
+    let totalTax = 0;
+    const lineItems = [];
 
-    const lineTotal = product.price * item.qty;
-    const lineTax = lineTotal * (product.tax / 100);
-    subtotal += lineTotal;
-    totalTax += lineTax;
+    for (const item of items) {
+      const { rows } = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [item.productId]);
+      if (rows.length === 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Product ${item.productId} not found` }); }
+      const product = rows[0];
+      product.price = parseFloat(product.price);
+      product.cost = parseFloat(product.cost);
+      product.tax = parseFloat(product.tax);
 
-    lineItems.push({
-      productId: product.id,
-      name: product.name,
-      sku: product.sku,
-      price: product.price,
-      qty: item.qty,
-      taxRate: product.tax,
-      taxAmount: Math.round(lineTax * 100) / 100,
-      total: Math.round((lineTotal + lineTax) * 100) / 100,
+      if (product.stock < item.qty) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Insufficient stock for ${product.name}` }); }
+
+      const lineTotal = product.price * item.qty;
+      const lineTax = lineTotal * (product.tax / 100);
+      subtotal += lineTotal;
+      totalTax += lineTax;
+
+      lineItems.push({
+        productId: product.id,
+        name: product.name,
+        sku: product.sku,
+        price: product.price,
+        qty: item.qty,
+        taxRate: product.tax,
+        taxAmount: Math.round(lineTax * 100) / 100,
+        total: Math.round((lineTotal + lineTax) * 100) / 100,
+      });
+
+      await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [item.qty, item.productId]);
+    }
+
+    const grandTotal = Math.round((subtotal + totalTax) * 100) / 100;
+    const custResult = await client.query('SELECT * FROM customers WHERE id = $1', [customerId || 1]);
+    const customer = custResult.rows[0] || { id: 1, name: 'Walk-in Customer' };
+
+    // Generate invoice number
+    const txCount = await client.query('SELECT COUNT(*) FROM transactions');
+    const txNum = parseInt(txCount.rows[0].count) + 1001;
+    const invoiceNo = `INV-${String(txNum).padStart(5, '0')}`;
+
+    const paid = amountPaid || grandTotal;
+    const change = Math.round((paid - grandTotal) * 100) / 100;
+
+    const { rows: txRows } = await client.query(
+      `INSERT INTO transactions (invoice_no, customer_id, customer_name, items, subtotal, tax, grand_total, payment_method, amount_paid, change, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'completed') RETURNING *`,
+      [invoiceNo, customer.id, customer.name, JSON.stringify(lineItems), Math.round(subtotal * 100) / 100, Math.round(totalTax * 100) / 100, grandTotal, paymentMethod || 'cash', paid, change]
+    );
+
+    await client.query('COMMIT');
+
+    const tx = txRows[0];
+    res.json({
+      id: tx.id,
+      invoiceNo: tx.invoice_no,
+      date: tx.date,
+      customer: { id: tx.customer_id, name: tx.customer_name },
+      items: tx.items,
+      subtotal: parseFloat(tx.subtotal),
+      tax: parseFloat(tx.tax),
+      grandTotal: parseFloat(tx.grand_total),
+      paymentMethod: tx.payment_method,
+      amountPaid: parseFloat(tx.amount_paid),
+      change: parseFloat(tx.change),
+      status: tx.status,
     });
-
-    product.stock -= item.qty;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
+});
 
-  const grandTotal = Math.round((subtotal + totalTax) * 100) / 100;
-  const customer = customers.find(c => c.id === customerId) || customers[0];
+app.get('/api/transactions', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM transactions ORDER BY id DESC');
+    res.json(rows.map(formatTx));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  const tx = {
-    id: nextTxId++,
-    invoiceNo: `INV-${String(nextTxId - 1).padStart(5, '0')}`,
-    date: new Date().toISOString(),
-    customer: { id: customer.id, name: customer.name },
-    items: lineItems,
-    subtotal: Math.round(subtotal * 100) / 100,
-    tax: Math.round(totalTax * 100) / 100,
-    grandTotal,
-    paymentMethod: paymentMethod || 'cash',
-    amountPaid: amountPaid || grandTotal,
-    change: Math.round(((amountPaid || grandTotal) - grandTotal) * 100) / 100,
-    status: 'completed',
+app.get('/api/transactions/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM transactions WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(formatTx(rows[0]));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function formatTx(tx) {
+  return {
+    id: tx.id,
+    invoiceNo: tx.invoice_no,
+    date: tx.date,
+    customer: { id: tx.customer_id, name: tx.customer_name },
+    items: tx.items,
+    subtotal: parseFloat(tx.subtotal),
+    tax: parseFloat(tx.tax),
+    grandTotal: parseFloat(tx.grand_total),
+    paymentMethod: tx.payment_method,
+    amountPaid: parseFloat(tx.amount_paid),
+    change: parseFloat(tx.change),
+    status: tx.status,
   };
-
-  transactions.push(tx);
-  res.json(tx);
-});
-
-app.get('/api/transactions', (req, res) => res.json(transactions.slice().reverse()));
-
-app.get('/api/transactions/:id', (req, res) => {
-  const tx = transactions.find(t => t.id === parseInt(req.params.id));
-  if (!tx) return res.status(404).json({ error: 'Not found' });
-  res.json(tx);
-});
+}
 
 // Dashboard stats
-app.get('/api/dashboard', (req, res) => {
-  const today = new Date().toISOString().split('T')[0];
-  const todayTx = transactions.filter(t => t.date.startsWith(today));
-  const totalRevenue = todayTx.reduce((sum, t) => sum + t.grandTotal, 0);
-  const totalTax = todayTx.reduce((sum, t) => sum + t.tax, 0);
-  const totalProfit = todayTx.reduce((sum, t) => {
-    return sum + t.items.reduce((s, item) => {
-      const product = products.find(p => p.id === item.productId);
-      return s + ((item.price - (product ? product.cost : 0)) * item.qty);
-    }, 0);
-  }, 0);
+app.get('/api/dashboard', async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
 
-  const lowStock = products.filter(p => p.stock < 20);
-  const topProducts = {};
-  todayTx.forEach(t => t.items.forEach(item => {
-    topProducts[item.name] = (topProducts[item.name] || 0) + item.qty;
-  }));
-  const topSelling = Object.entries(topProducts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([name, qty]) => ({ name, qty }));
+    const todayTx = await pool.query(
+      "SELECT * FROM transactions WHERE date::date = $1",
+      [today]
+    );
 
-  res.json({
-    today: {
-      transactions: todayTx.length,
-      revenue: Math.round(totalRevenue * 100) / 100,
-      tax: Math.round(totalTax * 100) / 100,
-      profit: Math.round(totalProfit * 100) / 100,
-    },
-    allTime: {
-      transactions: transactions.length,
-      revenue: Math.round(transactions.reduce((s, t) => s + t.grandTotal, 0) * 100) / 100,
-    },
-    lowStock,
-    topSelling,
-    recentTransactions: transactions.slice(-5).reverse(),
-  });
+    const txList = todayTx.rows;
+    const totalRevenue = txList.reduce((sum, t) => sum + parseFloat(t.grand_total), 0);
+    const totalTax = txList.reduce((sum, t) => sum + parseFloat(t.tax), 0);
+
+    // Calculate profit
+    let totalProfit = 0;
+    for (const t of txList) {
+      for (const item of t.items) {
+        const prod = await pool.query('SELECT cost FROM products WHERE id = $1', [item.productId]);
+        const cost = prod.rows.length > 0 ? parseFloat(prod.rows[0].cost) : 0;
+        totalProfit += (item.price - cost) * item.qty;
+      }
+    }
+
+    const lowStock = await pool.query('SELECT * FROM products WHERE stock < 20 ORDER BY stock ASC');
+    const allTx = await pool.query('SELECT * FROM transactions ORDER BY id DESC');
+    const recentTx = allTx.rows.slice(0, 5);
+
+    res.json({
+      today: {
+        transactions: txList.length,
+        revenue: Math.round(totalRevenue * 100) / 100,
+        tax: Math.round(totalTax * 100) / 100,
+        profit: Math.round(totalProfit * 100) / 100,
+      },
+      allTime: {
+        transactions: allTx.rows.length,
+        revenue: Math.round(allTx.rows.reduce((s, t) => s + parseFloat(t.grand_total), 0) * 100) / 100,
+      },
+      lowStock: lowStock.rows.map(r => ({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) })),
+      topSelling: [],
+      recentTransactions: recentTx.map(formatTx),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Fallback
@@ -167,6 +324,12 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`POS System running on port ${PORT}`);
+// ===== Start =====
+initDB().then(() => {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`POS System running on port ${PORT}`);
+  });
+}).catch(err => {
+  console.error('Failed to init DB:', err.message);
+  process.exit(1);
 });
