@@ -81,10 +81,21 @@ async function initDB() {
       `);
     }
 
-    console.log('Database initialized successfully');
+    // Log DB status
+    const txCheck = await client.query('SELECT COUNT(*) FROM transactions');
+    const prodCheck = await client.query('SELECT COUNT(*) FROM products');
+    console.log(`Database initialized: ${prodCheck.rows[0].count} products, ${txCheck.rows[0].count} transactions`);
   } finally {
     client.release();
   }
+}
+
+// Helper: safely parse items JSONB (handles double-encoded strings)
+function parseItems(items) {
+  if (typeof items === 'string') {
+    try { return JSON.parse(items); } catch { return []; }
+  }
+  return Array.isArray(items) ? items : [];
 }
 
 // ===== API Routes =====
@@ -109,6 +120,7 @@ app.get('/api/products', async (req, res) => {
     const { rows } = await pool.query(query, params);
     res.json(rows.map(r => ({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) })));
   } catch (err) {
+    console.error('GET /api/products error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -123,6 +135,7 @@ app.post('/api/products', async (req, res) => {
     const r = rows[0];
     res.json({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) });
   } catch (err) {
+    console.error('POST /api/products error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -138,6 +151,7 @@ app.put('/api/products/:id', async (req, res) => {
     const r = rows[0];
     res.json({ ...r, price: parseFloat(r.price), cost: parseFloat(r.cost), tax: parseFloat(r.tax) });
   } catch (err) {
+    console.error('PUT /api/products error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -204,21 +218,24 @@ app.post('/api/transactions', async (req, res) => {
     const paid = amountPaid || grandTotal;
     const change = Math.round((paid - grandTotal) * 100) / 100;
 
+    // FIX: pass lineItems array directly — let pg handle JSONB serialization
     const { rows: txRows } = await client.query(
       `INSERT INTO transactions (invoice_no, customer_id, customer_name, items, subtotal, tax, grand_total, payment_method, amount_paid, change, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'completed') RETURNING *`,
+       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,'completed') RETURNING *`,
       [invoiceNo, customer.id, customer.name, JSON.stringify(lineItems), Math.round(subtotal * 100) / 100, Math.round(totalTax * 100) / 100, grandTotal, paymentMethod || 'cash', paid, change]
     );
 
     await client.query('COMMIT');
 
     const tx = txRows[0];
+    console.log(`Transaction ${tx.invoice_no} saved: ${tx.grand_total} SAR, ${parseItems(tx.items).length} items`);
+
     res.json({
       id: tx.id,
       invoiceNo: tx.invoice_no,
       date: tx.date,
       customer: { id: tx.customer_id, name: tx.customer_name },
-      items: tx.items,
+      items: parseItems(tx.items),
       subtotal: parseFloat(tx.subtotal),
       tax: parseFloat(tx.tax),
       grandTotal: parseFloat(tx.grand_total),
@@ -229,6 +246,7 @@ app.post('/api/transactions', async (req, res) => {
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    console.error('POST /api/transactions error:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
@@ -240,6 +258,7 @@ app.get('/api/transactions', async (req, res) => {
     const { rows } = await pool.query('SELECT * FROM transactions ORDER BY id DESC');
     res.json(rows.map(formatTx));
   } catch (err) {
+    console.error('GET /api/transactions error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -260,7 +279,7 @@ function formatTx(tx) {
     invoiceNo: tx.invoice_no,
     date: tx.date,
     customer: { id: tx.customer_id, name: tx.customer_name },
-    items: tx.items,
+    items: parseItems(tx.items),
     subtotal: parseFloat(tx.subtotal),
     tax: parseFloat(tx.tax),
     grandTotal: parseFloat(tx.grand_total),
@@ -271,20 +290,18 @@ function formatTx(tx) {
   };
 }
 
-// Dashboard stats
+// Dashboard stats — uses CURRENT_DATE from PostgreSQL to avoid timezone mismatch
 app.get('/api/dashboard', async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
-
-    // Today's aggregated stats (single query)
+    // Today's aggregated stats — use PostgreSQL CURRENT_DATE (no JS date mismatch)
     const todayStats = await pool.query(`
       SELECT
         COUNT(*)::int AS tx_count,
         COALESCE(SUM(grand_total), 0) AS revenue,
         COALESCE(SUM(tax), 0) AS tax_total,
         COALESCE(SUM(subtotal), 0) AS subtotal_total
-      FROM transactions WHERE date::date = $1
-    `, [today]);
+      FROM transactions WHERE date::date = CURRENT_DATE
+    `);
     const ts = todayStats.rows[0];
 
     // All-time stats
@@ -294,12 +311,13 @@ app.get('/api/dashboard', async (req, res) => {
     `);
     const at = allTimeStats.rows[0];
 
-    // Today's profit from line items vs product cost
-    const todayTx = await pool.query('SELECT items FROM transactions WHERE date::date = $1', [today]);
+    // All transactions for today — for profit & top selling calc
+    const todayTx = await pool.query('SELECT items FROM transactions WHERE date::date = CURRENT_DATE');
     let totalProfit = 0;
     const productSales = {};
     for (const t of todayTx.rows) {
-      for (const item of t.items) {
+      const items = parseItems(t.items);
+      for (const item of items) {
         const prod = await pool.query('SELECT cost FROM products WHERE id = $1', [item.productId]);
         const cost = prod.rows.length > 0 ? parseFloat(prod.rows[0].cost) : 0;
         totalProfit += (item.price - cost) * item.qty;
@@ -316,23 +334,25 @@ app.get('/api/dashboard', async (req, res) => {
     // Payment method breakdown today
     const paymentBreakdown = await pool.query(`
       SELECT payment_method, COUNT(*)::int AS count, COALESCE(SUM(grand_total), 0) AS total
-      FROM transactions WHERE date::date = $1
+      FROM transactions WHERE date::date = CURRENT_DATE
       GROUP BY payment_method ORDER BY total DESC
-    `, [today]);
+    `);
 
     // Low stock products
     const lowStock = await pool.query('SELECT * FROM products WHERE stock < 20 ORDER BY stock ASC');
 
-    // Recent 10 transactions
+    // Recent 10 transactions (all time, not just today)
     const recentTx = await pool.query('SELECT * FROM transactions ORDER BY id DESC LIMIT 10');
 
     // Sales last 7 days
     const salesByDay = await pool.query(`
       SELECT date::date AS day, COUNT(*)::int AS tx_count, COALESCE(SUM(grand_total), 0) AS revenue
       FROM transactions
-      WHERE date >= NOW() - INTERVAL '7 days'
+      WHERE date >= CURRENT_DATE - INTERVAL '7 days'
       GROUP BY date::date ORDER BY day DESC
     `);
+
+    console.log(`Dashboard: today=${ts.tx_count} tx, all-time=${at.tx_count} tx, recent=${recentTx.rows.length}`);
 
     res.json({
       today: {
@@ -358,6 +378,33 @@ app.get('/api/dashboard', async (req, res) => {
         transactions: r.tx_count,
         revenue: parseFloat(parseFloat(r.revenue).toFixed(2)),
       })),
+    });
+  } catch (err) {
+    console.error('GET /api/dashboard error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Debug endpoint — check DB state
+app.get('/api/debug', async (req, res) => {
+  try {
+    const products = await pool.query('SELECT COUNT(*) FROM products');
+    const customers = await pool.query('SELECT COUNT(*) FROM customers');
+    const transactions = await pool.query('SELECT COUNT(*) FROM transactions');
+    const lastTx = await pool.query('SELECT id, invoice_no, date, grand_total, items FROM transactions ORDER BY id DESC LIMIT 1');
+    const dbTime = await pool.query('SELECT NOW() AS now, CURRENT_DATE AS today');
+    res.json({
+      counts: {
+        products: parseInt(products.rows[0].count),
+        customers: parseInt(customers.rows[0].count),
+        transactions: parseInt(transactions.rows[0].count),
+      },
+      dbTime: dbTime.rows[0],
+      lastTransaction: lastTx.rows[0] ? {
+        ...lastTx.rows[0],
+        itemsType: typeof lastTx.rows[0].items,
+        itemsParsed: parseItems(lastTx.rows[0].items),
+      } : null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
